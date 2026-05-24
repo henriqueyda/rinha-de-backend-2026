@@ -4,12 +4,14 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -97,6 +99,7 @@ type Neighbor struct {
 }
 
 func main() {
+	runtime.GOMAXPROCS(1)
 	go initialize()
 
 	go func() {
@@ -164,6 +167,11 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type FraudResponse struct {
+	Approved   bool    `json:"approved"`
+	FraudScore float32 `json:"fraud_score"`
+}
+
 func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 	if !ready.Load() {
 		http.Error(
@@ -174,8 +182,14 @@ func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	var req TransactionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -188,14 +202,19 @@ func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 
 	approved, score := index.Search(vector)
 
-	response := map[string]interface{}{
-		"approved":    approved,
-		"fraud_score": score,
+	resp := FraudResponse{
+		Approved:   approved,
+		FraudScore: score,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
-	json.NewEncoder(w).Encode(response)
+	responseData, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Write(responseData)
 }
 
 func loadDataset(path string) ([]Vector, error) {
