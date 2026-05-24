@@ -2,6 +2,7 @@ package main
 
 import (
 	"compress/gzip"
+	"container/heap"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,21 +11,17 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"sync"
+	"sort"
 	"sync/atomic"
 	"time"
-
-	"github.com/bytedance/sonic"
-	"github.com/valyala/fasthttp"
 )
 
 const (
 	Dimensions = 14
-
-	KClusters = 8
-	NProbe    = 1
-	KNN       = 5
-	MaxIters  = 5
+	KClusters  = 8
+	NProbe     = 1
+	KNN        = 5
+	MaxIters   = 5
 )
 
 var (
@@ -121,13 +118,9 @@ func (h *MaxHeap) Push(x interface{}) {
 
 func (h *MaxHeap) Pop() interface{} {
 	old := *h
-
 	n := len(old)
-
 	item := old[n-1]
-
 	*h = old[:n-1]
-
 	return item
 }
 
@@ -138,40 +131,11 @@ func main() {
 		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
 	}()
 
-	requestHandler := func(ctx *fasthttp.RequestCtx) {
-		switch string(ctx.Path()) {
-		case "/health":
-			healthHandler(ctx)
-		case "/fraud-score":
-			fraudScoreHandler(ctx)
-		default:
-			ctx.SetStatusCode(fasthttp.StatusNotFound)
-			ctx.SetBodyString(`{"error": "not found"}`)
-		}
-	}
-
+	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/fraud-score", fraudScoreHandler)
 	fmt.Println("Server listening on :8080")
-
-	// 4. Sobe o servidor de alta performance na porta de produção
-	if err := fasthttp.ListenAndServe(":8080", requestHandler); err != nil {
-		log.Fatalf("Erro ao iniciar o servidor fasthttp: %s", err)
-	}
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
-
-// func main() {
-// 	go initialize()
-
-// 	go func() {
-// 		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-// 	}()
-
-// 	http.HandleFunc("/health", healthHandler)
-// 	http.HandleFunc("/fraud-score", fraudScoreHandler)
-
-// 	fmt.Println("Server listening on :8080")
-
-// 	log.Fatal(http.ListenAndServe(":8080", nil))
-// }
 
 func initialize() {
 	fmt.Println("Loading normalization...")
@@ -194,7 +158,7 @@ func initialize() {
 
 	// vectors, err := loadDataset("resources/references.json.gz")
 	// if err != nil {
-	// 	panic(err)
+	//  panic(err)
 	// }
 
 	vectors, err := loadExampleReferences("resources/example-references.json")
@@ -213,119 +177,54 @@ func initialize() {
 	ready.Store(true)
 }
 
-// func healthHandler(w http.ResponseWriter, r *http.Request) {
-// 	if !ready.Load() {
-// 		w.WriteHeader(http.StatusServiceUnavailable)
-
-// 		json.NewEncoder(w).Encode(map[string]string{
-// 			"status": "loading",
-// 		})
-
-// 		return
-// 	}
-
-// 	w.WriteHeader(http.StatusOK)
-
-// 	json.NewEncoder(w).Encode(map[string]string{
-// 		"status": "ready",
-// 	})
-// }
-
-func healthHandler(ctx *fasthttp.RequestCtx) {
-	ctx.SetContentType("application/json")
-
+func healthHandler(w http.ResponseWriter, r *http.Request) {
 	if !ready.Load() {
-		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
-		ctx.SetBodyString(`{"status": "loading"}`)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "loading",
+		})
 		return
 	}
 
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetBodyString(`{"status": "ready"}`)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "ready",
+	})
 }
 
-var requestPool = sync.Pool{
-	New: func() interface{} {
-		return new(TransactionRequest)
-	},
-}
-
-func fraudScoreHandler(ctx *fasthttp.RequestCtx) {
+func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 	if !ready.Load() {
-		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
-		ctx.SetBodyString(`{"error": "index still loading"}`)
+		http.Error(
+			w,
+			"index still loading",
+			http.StatusServiceUnavailable,
+		)
 		return
 	}
 
-	req := requestPool.Get().(*TransactionRequest)
-
-	defer func() {
-		req.Customer.KnownMerchants = req.Customer.KnownMerchants[:0]
-		requestPool.Put(req)
-	}()
-
-	bodyBytes := ctx.PostBody()
-
-	if err := sonic.Unmarshal(bodyBytes, req); err != nil {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		ctx.SetBodyString(`{"error": "invalid json format"}`)
+	var req TransactionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	vector := Vectorize(*req, norm, mccRisk)
+	vector := Vectorize(
+		req,
+		norm,
+		mccRisk,
+	)
 
 	approved, score := index.Search(vector)
 
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.SetContentType("application/json")
-	fmt.Fprintf(ctx, `{"approved":%t,"fraud_score":%.2f}`, approved, score)
+	response := map[string]interface{}{
+		"approved":    approved,
+		"fraud_score": score,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	json.NewEncoder(w).Encode(response)
 }
-
-// func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
-// 	if !ready.Load() {
-// 		http.Error(
-// 			w,
-// 			"index still loading",
-// 			http.StatusServiceUnavailable,
-// 		)
-
-// 		return
-// 	}
-
-// 	req := requestPool.Get().(*TransactionRequest)
-
-// 	defer func() {
-// 		// Limpa os slices internos para não vazar dados entre requisições
-// 		req.Customer.KnownMerchants = req.Customer.KnownMerchants[:0]
-// 		requestPool.Put(req)
-// 	}()
-
-// 	bodyBytes, err := io.ReadAll(r.Body)
-// 	if err != nil {
-// 		http.Error(w, err.Error(), http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	// O Sonic faz o Unmarshal direto nos bytes sem alocar scanners internos
-// 	err = sonic.Unmarshal(bodyBytes, req)
-
-// 	vector := Vectorize(
-// 		*req,
-// 		norm,
-// 		mccRisk,
-// 	)
-
-// 	approved, score := index.Search(vector)
-
-// 	response := map[string]interface{}{
-// 		"approved":    approved,
-// 		"fraud_score": score,
-// 	}
-
-// 	w.Header().Set("Content-Type", "application/json")
-
-// 	json.NewEncoder(w).Encode(response)
-// }
 
 func loadDataset(path string) ([]Vector, error) {
 	file, err := os.Open(path)
@@ -481,112 +380,57 @@ func buildIVF(vectors []Vector, k int) *IVFIndex {
 	}
 }
 
-// func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
-// 	type ClusterDistance struct {
-// 		Index int
-// 		Dist  float32
-// 	}
-
-// 	clusterDists := make([]ClusterDistance, len(idx.Clusters))
-// 	for i, cluster := range idx.Clusters {
-// 		clusterDists[i] = ClusterDistance{
-// 			Index: i,
-// 			Dist: squaredDistance(
-// 				query,
-// 				cluster.Centroid,
-// 			),
-// 		}
-// 	}
-// 	sort.Slice(clusterDists, func(i, j int) bool {
-// 		return clusterDists[i].Dist < clusterDists[j].Dist
-// 	})
-
-// 	topK := &MaxHeap{}
-
-// 	heap.Init(topK)
-
-// 	for i := 0; i < NProbe; i++ {
-// 		cluster := idx.Clusters[clusterDists[i].Index]
-
-// 		for _, vec := range cluster.Vectors {
-
-// 			dist := squaredDistance(
-// 				query,
-// 				vec.Values,
-// 			)
-
-// 			neighbor := Neighbor{
-// 				Dist:  dist,
-// 				Fraud: vec.Fraud,
-// 			}
-
-// 			if topK.Len() < KNN {
-// 				heap.Push(topK, neighbor)
-// 				continue
-// 			}
-
-// 			if dist < (*topK)[0].Dist {
-// 				heap.Pop(topK)
-// 				heap.Push(topK, neighbor)
-// 			}
-// 		}
-// 	}
-
-// 	frauds := 0
-
-// 	for _, n := range *topK {
-// 		if n.Fraud {
-// 			frauds++
-// 		}
-// 	}
-
-// 	score := float32(frauds) / float32(KNN)
-
-// 	return score < 0.6, score
-// }
-
 func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
-	bestClusterIdx := 0
-	bestClusterDist := float32(math.MaxFloat32)
+	type ClusterDistance struct {
+		Index int
+		Dist  float32
+	}
 
+	clusterDists := make([]ClusterDistance, len(idx.Clusters))
 	for i, cluster := range idx.Clusters {
-		dist := squaredDistance(query, cluster.Centroid)
-		if dist < bestClusterDist {
-			bestClusterDist = dist
-			bestClusterIdx = i
+		clusterDists[i] = ClusterDistance{
+			Index: i,
+			Dist: squaredDistance(
+				query,
+				cluster.Centroid,
+			),
 		}
 	}
 
-	cluster := idx.Clusters[bestClusterIdx]
+	sort.Slice(clusterDists, func(i, j int) bool {
+		return clusterDists[i].Dist < clusterDists[j].Dist
+	})
 
-	var topK [KNN]Neighbor
-	for i := range topK {
-		topK[i].Dist = math.MaxFloat32
-	}
+	topK := &MaxHeap{}
+	heap.Init(topK)
 
-	for _, vec := range cluster.Vectors {
-		dist := squaredDistance(query, vec.Values)
+	for i := 0; i < NProbe; i++ {
+		cluster := idx.Clusters[clusterDists[i].Index]
+		for _, vec := range cluster.Vectors {
+			dist := squaredDistance(
+				query,
+				vec.Values,
+			)
+			neighbor := Neighbor{
+				Dist:  dist,
+				Fraud: vec.Fraud,
+			}
 
-		if dist >= topK[KNN-1].Dist {
-			continue
-		}
+			if topK.Len() < KNN {
+				heap.Push(topK, neighbor)
+				continue
+			}
 
-		for j := 0; j < KNN; j++ {
-			if dist < topK[j].Dist {
-				for k := KNN - 1; k > j; k-- {
-					topK[k] = topK[k-1]
-				}
-				topK[j] = Neighbor{Dist: dist, Fraud: vec.Fraud}
-				break
+			if dist < (*topK)[0].Dist {
+				heap.Pop(topK)
+				heap.Push(topK, neighbor)
 			}
 		}
 	}
 	frauds := 0
-	for i := 0; i < KNN; i++ {
-		if topK[i].Dist == math.MaxFloat32 {
-			continue
-		}
-		if topK[i].Fraud {
+
+	for _, n := range *topK {
+		if n.Fraud {
 			frauds++
 		}
 	}
@@ -615,11 +459,8 @@ func Vectorize(
 	norm Normalization,
 	mccRisk map[string]float32,
 ) [14]float32 {
-
 	var vec [14]float32
-
 	vec[0] = clamp(req.Transaction.Amount / norm.MaxAmount)
-
 	vec[1] = clamp(
 		float32(req.Transaction.Installments) /
 			norm.MaxInstallments,
@@ -627,7 +468,6 @@ func Vectorize(
 
 	if req.Customer.AvgAmount > 0 {
 		ratio := (req.Transaction.Amount / req.Customer.AvgAmount) / norm.AmountVsAvgRatio
-
 		vec[2] = clamp(ratio)
 	}
 
