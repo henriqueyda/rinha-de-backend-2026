@@ -132,15 +132,12 @@ func (h *MaxHeap) Pop() interface{} {
 }
 
 func main() {
-	// Dispara a inicialização pesada em background exatamente como você fazia
 	go initialize()
 
-	// MANTIDO: O pprof original continua escutando na porta 6060 usando o net/http padrão
 	go func() {
 		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
 	}()
 
-	// 3. O Roteador central do Fasthttp avalia o caminho da URL por bytes
 	requestHandler := func(ctx *fasthttp.RequestCtx) {
 		switch string(ctx.Path()) {
 		case "/health":
@@ -239,7 +236,6 @@ func healthHandler(ctx *fasthttp.RequestCtx) {
 
 	if !ready.Load() {
 		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
-		// Alocação Zero: escreve a string direta no buffer de resposta
 		ctx.SetBodyString(`{"status": "loading"}`)
 		return
 	}
@@ -255,42 +251,31 @@ var requestPool = sync.Pool{
 }
 
 func fraudScoreHandler(ctx *fasthttp.RequestCtx) {
-	// 1. Proteção caso batam na rota antes do IVF terminar de carregar em background
 	if !ready.Load() {
 		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
 		ctx.SetBodyString(`{"error": "index still loading"}`)
 		return
 	}
 
-	// 2. Pega uma struct limpa do Pool
 	req := requestPool.Get().(*TransactionRequest)
 
-	// Garante a limpeza do slice e a devolução ao pool no final do fluxo
 	defer func() {
 		req.Customer.KnownMerchants = req.Customer.KnownMerchants[:0]
 		requestPool.Put(req)
 	}()
 
-	// 3. Resgata os bytes do corpo sem alocações extras de I/O
 	bodyBytes := ctx.PostBody()
 
-	// 4. Parse ultra veloz com o Sonic
 	if err := sonic.Unmarshal(bodyBytes, req); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 		ctx.SetBodyString(`{"error": "invalid json format"}`)
 		return
 	}
 
-	// 5. SUA LÓGICA DE NEGÓCIO DE VOLTA:
-	// Desreferenciamos o ponteiro (*req) pois a sua função Vectorize espera a struct por valor
 	vector := Vectorize(*req, norm, mccRisk)
 
-	// Executa a busca vetorial otimizada na Stack
 	approved, score := index.Search(vector)
 
-	// 6. RESPOSTA DINÂMICA ULTRA OTMIZADA:
-	// Em vez de criar um map[string]interface{} (que geraria alocações no heap),
-	// nós escrevemos diretamente o JSON formatado no Writer de resposta do contexto.
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	ctx.SetContentType("application/json")
 	fmt.Fprintf(ctx, `{"approved":%t,"fraud_score":%.2f}`, approved, score)
@@ -561,8 +546,6 @@ func buildIVF(vectors []Vector, k int) *IVFIndex {
 // }
 
 func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
-	// 1. Como NProbe = 1, evitamos o 'make' e o 'sort.Slice'.
-	// Encontramos o cluster mais próximo com um loop simples O(N).
 	bestClusterIdx := 0
 	bestClusterDist := float32(math.MaxFloat32)
 
@@ -576,8 +559,6 @@ func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
 
 	cluster := idx.Clusters[bestClusterIdx]
 
-	// 2. Criamos um array fixo na Stack para o TopK.
-	// Isso elimina completamente o container/heap e suas alocações.
 	var topK [KNN]Neighbor
 	for i := range topK {
 		topK[i].Dist = math.MaxFloat32
@@ -586,15 +567,12 @@ func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
 	for _, vec := range cluster.Vectors {
 		dist := squaredDistance(query, vec.Values)
 
-		// Se a distância atual for maior ou igual ao pior vizinho que já temos, ignora
 		if dist >= topK[KNN-1].Dist {
 			continue
 		}
 
-		// Inserção ordenada direta no array (Insertion Sort manual para tamanho 5)
 		for j := 0; j < KNN; j++ {
 			if dist < topK[j].Dist {
-				// Desloca os elementos restantes para a direita
 				for k := KNN - 1; k > j; k-- {
 					topK[k] = topK[k-1]
 				}
@@ -603,12 +581,10 @@ func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
 			}
 		}
 	}
-
-	// 3. Contabiliza os resultados
 	frauds := 0
 	for i := 0; i < KNN; i++ {
 		if topK[i].Dist == math.MaxFloat32 {
-			continue // Evita slots vazios caso o cluster tenha menos que 5 elementos
+			continue
 		}
 		if topK[i].Fraud {
 			frauds++
