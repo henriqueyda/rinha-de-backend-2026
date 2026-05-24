@@ -4,7 +4,6 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"math/rand"
@@ -12,6 +11,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -172,6 +172,12 @@ type FraudResponse struct {
 	FraudScore float32 `json:"fraud_score"`
 }
 
+var pool = sync.Pool{
+	New: func() any {
+		return new(TransactionRequest)
+	},
+}
+
 func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 	if !ready.Load() {
 		http.Error(
@@ -182,14 +188,13 @@ func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var req TransactionRequest
-	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+	req := pool.Get().(*TransactionRequest)
+	defer func() {
+		req.Customer.KnownMerchants = req.Customer.KnownMerchants[:0]
+		req.LastTransaction = nil
+		pool.Put(req)
+	}()
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -209,12 +214,10 @@ func fraudScoreHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	responseData, err := json.Marshal(resp)
-	if err != nil {
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Write(responseData)
 }
 
 func loadDataset(path string) ([]Vector, error) {
@@ -451,7 +454,7 @@ func squaredDistance(
 }
 
 func Vectorize(
-	req TransactionRequest,
+	req *TransactionRequest,
 	norm Normalization,
 	mccRisk map[string]float32,
 ) [14]float32 {
