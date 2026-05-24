@@ -2,7 +2,6 @@ package main
 
 import (
 	"compress/gzip"
-	"container/heap"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"sort"
 	"sync/atomic"
 	"time"
 )
@@ -19,7 +17,7 @@ import (
 const (
 	Dimensions = 14
 	KClusters  = 8
-	NProbe     = 1
+	NProbe     = 3
 	KNN        = 5
 	MaxIters   = 5
 )
@@ -96,32 +94,6 @@ type Normalization struct {
 type Neighbor struct {
 	Dist  float32
 	Fraud bool
-}
-
-type MaxHeap []Neighbor
-
-func (h MaxHeap) Len() int {
-	return len(h)
-}
-
-func (h MaxHeap) Less(i, j int) bool {
-	return h[i].Dist > h[j].Dist
-}
-
-func (h MaxHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-func (h *MaxHeap) Push(x interface{}) {
-	*h = append(*h, x.(Neighbor))
-}
-
-func (h *MaxHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
-	return item
 }
 
 func main() {
@@ -381,56 +353,62 @@ func buildIVF(vectors []Vector, k int) *IVFIndex {
 }
 
 func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
-	type ClusterDistance struct {
+	type LocalClusterDist struct {
 		Index int
 		Dist  float32
 	}
+	var clusterDists [KClusters]LocalClusterDist
 
-	clusterDists := make([]ClusterDistance, len(idx.Clusters))
-	for i, cluster := range idx.Clusters {
-		clusterDists[i] = ClusterDistance{
+	for i := range idx.Clusters {
+		clusterDists[i] = LocalClusterDist{
 			Index: i,
-			Dist: squaredDistance(
-				query,
-				cluster.Centroid,
-			),
+			Dist:  squaredDistance(query, idx.Clusters[i].Centroid),
 		}
 	}
 
-	sort.Slice(clusterDists, func(i, j int) bool {
-		return clusterDists[i].Dist < clusterDists[j].Dist
-	})
+	for i := 1; i < KClusters; i++ {
+		key := clusterDists[i]
+		j := i - 1
+		for j >= 0 && clusterDists[j].Dist > key.Dist {
+			clusterDists[j+1] = clusterDists[j]
+			j--
+		}
+		clusterDists[j+1] = key
+	}
 
-	topK := &MaxHeap{}
-	heap.Init(topK)
+	var topNeighbors [KNN]Neighbor
+	for i := range topNeighbors {
+		topNeighbors[i].Dist = math.MaxFloat32
+	}
+	count := 0
 
-	for i := 0; i < NProbe; i++ {
-		cluster := idx.Clusters[clusterDists[i].Index]
-		for _, vec := range cluster.Vectors {
-			dist := squaredDistance(
-				query,
-				vec.Values,
-			)
-			neighbor := Neighbor{
-				Dist:  dist,
-				Fraud: vec.Fraud,
-			}
+	for p := 0; p < NProbe; p++ {
+		clusterIdx := clusterDists[p].Index
+		cluster := &idx.Clusters[clusterIdx]
 
-			if topK.Len() < KNN {
-				heap.Push(topK, neighbor)
-				continue
-			}
+		for i := range cluster.Vectors {
+			vec := &cluster.Vectors[i]
+			dist := squaredDistance(query, vec.Values)
 
-			if dist < (*topK)[0].Dist {
-				heap.Pop(topK)
-				heap.Push(topK, neighbor)
+			if dist < topNeighbors[KNN-1].Dist {
+				pos := KNN - 1
+				for pos > 0 && dist < topNeighbors[pos-1].Dist {
+					pos--
+				}
+				for j := KNN - 1; j > pos; j-- {
+					topNeighbors[j] = topNeighbors[j-1]
+				}
+				topNeighbors[pos] = Neighbor{Dist: dist, Fraud: vec.Fraud}
+				if count < KNN {
+					count++
+				}
 			}
 		}
 	}
+
 	frauds := 0
-
-	for _, n := range *topK {
-		if n.Fraud {
+	for i := 0; i < count; i++ {
+		if topNeighbors[i].Fraud {
 			frauds++
 		}
 	}
@@ -438,7 +416,6 @@ func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
 	score := float32(frauds) / float32(KNN)
 	return score < 0.6, score
 }
-
 func squaredDistance(
 	a [Dimensions]float32,
 	b [Dimensions]float32,
