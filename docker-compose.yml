@@ -1,6 +1,7 @@
 services:
   nginx:
     image: nginx:alpine
+    platform: linux/amd64
     ports:
       - "9999:9999"
     volumes:
@@ -17,6 +18,7 @@ services:
   api1:
     build: .
     hostname: api1
+    platform: linux/amd64
     ports:
       - "8081:8080"
       - "6061:6060"
@@ -29,6 +31,7 @@ services:
   api2:
     build: .
     hostname: api2
+    platform: linux/amd64
     ports:
       - "8082:8080"
       - "6062:6060"
