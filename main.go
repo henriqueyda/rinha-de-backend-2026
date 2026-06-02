@@ -2,13 +2,15 @@ package main
 
 import (
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
-	_ "net/http/pprof"
+
+	// _ "net/http/pprof"
 	"os"
 	"runtime"
 	"sync"
@@ -18,10 +20,10 @@ import (
 
 const (
 	Dimensions = 14
-	KClusters  = 8
+	KClusters  = 256
 	NProbe     = 3
 	KNN        = 5
-	MaxIters   = 5
+	MaxIters   = 20
 )
 
 var (
@@ -99,17 +101,89 @@ type Neighbor struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "preprocess" {
+		runPreprocess()
+		return
+	}
 	runtime.GOMAXPROCS(1)
 	go initialize()
 
-	go func() {
-		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-	}()
+	// go func() {
+	// 	log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	// }()
 
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/fraud-score", fraudScoreHandler)
 	fmt.Println("Server listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func runPreprocess() {
+	fmt.Println("Beginning preprocessing...")
+
+	vectors, err := loadDataset("resources/references.json.gz")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Loaded %d vectors\n", len(vectors))
+
+	fmt.Println("Building IVF index (KMeans)...")
+	idx := buildIVF(vectors, KClusters)
+
+	fmt.Println("Saving index.bin...")
+	file, err := os.Create("resources/index.bin")
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	err = binary.Write(file, binary.LittleEndian, int32(len(idx.Clusters)))
+	if err != nil {
+		panic(err)
+	}
+
+	for _, c := range idx.Clusters {
+		binary.Write(file, binary.LittleEndian, c.Centroid)
+		binary.Write(file, binary.LittleEndian, int32(len(c.Vectors)))
+		binary.Write(file, binary.LittleEndian, c.Vectors)
+	}
+
+	fmt.Println("Preprocessing finished!")
+}
+
+func loadIndexBin(path string) (*IVFIndex, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var idx IVFIndex
+	var numClusters int32
+
+	if err := binary.Read(file, binary.LittleEndian, &numClusters); err != nil {
+		return nil, err
+	}
+
+	idx.Clusters = make([]Cluster, numClusters)
+	for i := 0; i < int(numClusters); i++ {
+		if err := binary.Read(file, binary.LittleEndian, &idx.Clusters[i].Centroid); err != nil {
+			return nil, err
+		}
+
+		var numVectors int32
+		if err := binary.Read(file, binary.LittleEndian, &numVectors); err != nil {
+			return nil, err
+		}
+
+		// Aloca a memória exata necessária e lê de uma vez
+		idx.Clusters[i].Vectors = make([]Vector, numVectors)
+		if err := binary.Read(file, binary.LittleEndian, &idx.Clusters[i].Vectors); err != nil {
+			return nil, err
+		}
+	}
+
+	return &idx, nil
 }
 
 func initialize() {
@@ -131,24 +205,10 @@ func initialize() {
 
 	fmt.Println("Loading references dataset...")
 
-	// vectors, err := loadDataset("resources/references.json.gz")
-	// if err != nil {
-	//  panic(err)
-	// }
-
-	vectors, err := loadExampleReferences("resources/example-references.json")
+	index, err = loadIndexBin("resources/index.bin")
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to read index.bin: %v", err))
 	}
-
-	fmt.Printf("Loaded %d vectors\n", len(vectors))
-
-	fmt.Println("Building IVF index...")
-
-	index = buildIVF(vectors, KClusters)
-
-	fmt.Println("IVF ready")
-
 	ready.Store(true)
 }
 
