@@ -112,7 +112,7 @@ func main() {
 	// 	log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
 	// }()
 
-	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/ready", readyHandler)
 	http.HandleFunc("/fraud-score", fraudScoreHandler)
 	fmt.Println("Server listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -212,19 +212,13 @@ func initialize() {
 	ready.Store(true)
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func readyHandler(w http.ResponseWriter, r *http.Request) {
 	if !ready.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "loading",
-		})
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "ready",
-	})
 }
 
 type FraudResponse struct {
