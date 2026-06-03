@@ -9,8 +9,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-
-	// _ "net/http/pprof"
 	"os"
 	"runtime"
 	"sync"
@@ -20,7 +18,7 @@ import (
 
 const (
 	Dimensions = 14
-	KClusters  = 256
+	KClusters  = 128
 	NProbe     = 3
 	KNN        = 5
 	MaxIters   = 20
@@ -39,12 +37,12 @@ type Reference struct {
 }
 
 type Vector struct {
-	Values [Dimensions]float32
+	Values [Dimensions]uint8
 	Fraud  bool
 }
 
 type Cluster struct {
-	Centroid [Dimensions]float32
+	Centroid [Dimensions]uint8
 	Vectors  []Vector
 }
 
@@ -96,7 +94,7 @@ type Normalization struct {
 }
 
 type Neighbor struct {
-	Dist  float32
+	Dist  int32
 	Fraud bool
 }
 
@@ -108,11 +106,7 @@ func main() {
 	runtime.GOMAXPROCS(1)
 	go initialize()
 
-	// go func() {
-	// 	log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-	// }()
-
-	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/ready", readyHandler)
 	http.HandleFunc("/fraud-score", fraudScoreHandler)
 	fmt.Println("Server listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -176,7 +170,6 @@ func loadIndexBin(path string) (*IVFIndex, error) {
 			return nil, err
 		}
 
-		// Aloca a memória exata necessária e lê de uma vez
 		idx.Clusters[i].Vectors = make([]Vector, numVectors)
 		if err := binary.Read(file, binary.LittleEndian, &idx.Clusters[i].Vectors); err != nil {
 			return nil, err
@@ -212,19 +205,13 @@ func initialize() {
 	ready.Store(true)
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func readyHandler(w http.ResponseWriter, r *http.Request) {
 	if !ready.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "loading",
-		})
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "ready",
-	})
 }
 
 type FraudResponse struct {
@@ -309,33 +296,13 @@ func loadDataset(path string) ([]Vector, error) {
 			return nil, err
 		}
 
+		var vals [Dimensions]uint8
+		for i, v := range ref.Vector {
+			vals[i] = toUint8(v)
+		}
+
 		vectors = append(vectors, Vector{
-			Values: ref.Vector,
-			Fraud:  ref.Label == "fraud",
-		})
-	}
-
-	return vectors, nil
-}
-
-func loadExampleReferences(path string) ([]Vector, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var refs []Reference
-
-	if err := json.NewDecoder(file).Decode(&refs); err != nil {
-		return nil, err
-	}
-
-	vectors := make([]Vector, 0, len(refs))
-
-	for _, ref := range refs {
-		vectors = append(vectors, Vector{
-			Values: ref.Vector,
+			Values: vals,
 			Fraud:  ref.Label == "fraud",
 		})
 	}
@@ -388,7 +355,7 @@ func buildIVF(vectors []Vector, k int) *IVFIndex {
 
 		for _, vec := range vectors {
 			bestCluster := 0
-			bestDist := float32(math.MaxFloat32)
+			bestDist := int32(math.MaxInt32)
 
 			for c := range clusters {
 				dist := squaredDistance(
@@ -413,19 +380,17 @@ func buildIVF(vectors []Vector, k int) *IVFIndex {
 				continue
 			}
 
-			var newCentroid [Dimensions]float32
+			var newCentroidSum [Dimensions]int
 
 			for _, vec := range clusters[c].Vectors {
 				for d := 0; d < Dimensions; d++ {
-					newCentroid[d] += vec.Values[d]
+					newCentroidSum[d] += int(vec.Values[d])
 				}
 			}
 
 			for d := 0; d < Dimensions; d++ {
-				newCentroid[d] /= float32(len(clusters[c].Vectors))
+				clusters[c].Centroid[d] = uint8(newCentroidSum[d] / len(clusters[c].Vectors))
 			}
-
-			clusters[c].Centroid = newCentroid
 		}
 	}
 
@@ -434,10 +399,10 @@ func buildIVF(vectors []Vector, k int) *IVFIndex {
 	}
 }
 
-func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
+func (idx *IVFIndex) Search(query [Dimensions]uint8) (bool, float32) {
 	type LocalClusterDist struct {
 		Index int
-		Dist  float32
+		Dist  int32
 	}
 	var clusterDists [KClusters]LocalClusterDist
 
@@ -460,7 +425,7 @@ func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
 
 	var topNeighbors [KNN]Neighbor
 	for i := range topNeighbors {
-		topNeighbors[i].Dist = math.MaxFloat32
+		topNeighbors[i].Dist = math.MaxInt32
 	}
 	count := 0
 
@@ -498,36 +463,41 @@ func (idx *IVFIndex) Search(query [Dimensions]float32) (bool, float32) {
 	score := float32(frauds) / float32(KNN)
 	return score < 0.6, score
 }
-func squaredDistance(
-	a [Dimensions]float32,
-	b [Dimensions]float32,
-) float32 {
 
-	var sum float32
+func squaredDistance(
+	a [Dimensions]uint8,
+	b [Dimensions]uint8,
+) int32 {
+
+	var sum int32
 
 	for i := 0; i < Dimensions; i++ {
-		diff := a[i] - b[i]
+		diff := int32(a[i]) - int32(b[i])
 		sum += diff * diff
 	}
 
 	return sum
 }
 
+func toUint8(v float32) uint8 {
+	return uint8(clamp(v) * 255.0)
+}
+
 func Vectorize(
 	req *TransactionRequest,
 	norm Normalization,
 	mccRisk map[string]float32,
-) [14]float32 {
-	var vec [14]float32
-	vec[0] = clamp(req.Transaction.Amount / norm.MaxAmount)
-	vec[1] = clamp(
+) [14]uint8 {
+	var vec [14]uint8
+	vec[0] = toUint8(req.Transaction.Amount / norm.MaxAmount)
+	vec[1] = toUint8(
 		float32(req.Transaction.Installments) /
 			norm.MaxInstallments,
 	)
 
 	if req.Customer.AvgAmount > 0 {
 		ratio := (req.Transaction.Amount / req.Customer.AvgAmount) / norm.AmountVsAvgRatio
-		vec[2] = clamp(ratio)
+		vec[2] = toUint8(ratio)
 	}
 
 	t, _ := time.Parse(
@@ -535,16 +505,17 @@ func Vectorize(
 		req.Transaction.RequestedAt,
 	)
 
-	vec[3] = float32(t.UTC().Hour()) / 23.0
+	vec[3] = toUint8(float32(t.UTC().Hour()) / 23.0)
 
 	weekday := int(t.UTC().Weekday())
 	weekday = (weekday + 6) % 7
 
-	vec[4] = float32(weekday) / 6.0
+	vec[4] = toUint8(float32(weekday) / 6.0)
 
 	if req.LastTransaction == nil {
-		vec[5] = -1
-		vec[6] = -1
+		// uint8 não permite -1, então mapeamos a ausência para 0
+		vec[5] = 0
+		vec[6] = 0
 	} else {
 		lastTime, _ := time.Parse(
 			time.RFC3339,
@@ -555,29 +526,29 @@ func Vectorize(
 			t.Sub(lastTime).Minutes(),
 		)
 
-		vec[5] = clamp(minutes / norm.MaxMinutes)
+		vec[5] = toUint8(minutes / norm.MaxMinutes)
 
-		vec[6] = clamp(
+		vec[6] = toUint8(
 			req.LastTransaction.KmFromCurrent /
 				norm.MaxKm,
 		)
 	}
 
-	vec[7] = clamp(
+	vec[7] = toUint8(
 		req.Terminal.KmFromHome / norm.MaxKm,
 	)
 
-	vec[8] = clamp(
+	vec[8] = toUint8(
 		float32(req.Customer.TxCount24h) /
 			norm.MaxTxCount24h,
 	)
 
 	if req.Terminal.IsOnline {
-		vec[9] = 1
+		vec[9] = 255 // Mapeado para o valor máximo em vez de 1
 	}
 
 	if req.Terminal.CardPresent {
-		vec[10] = 1
+		vec[10] = 255
 	}
 
 	known := false
@@ -590,7 +561,7 @@ func Vectorize(
 	}
 
 	if !known {
-		vec[11] = 1
+		vec[11] = 255
 	}
 
 	risk, ok := mccRisk[req.Merchant.MCC]
@@ -599,9 +570,9 @@ func Vectorize(
 		risk = 0.5
 	}
 
-	vec[12] = risk
+	vec[12] = toUint8(risk)
 
-	vec[13] = clamp(
+	vec[13] = toUint8(
 		req.Merchant.AvgAmount /
 			norm.MaxMerchantAvgAmount,
 	)
