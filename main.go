@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -18,7 +19,7 @@ import (
 
 const (
 	Dimensions = 14
-	KClusters  = 128
+	KClusters  = 1024
 	NProbe     = 3
 	KNN        = 5
 	MaxIters   = 20
@@ -108,6 +109,25 @@ func main() {
 
 	http.HandleFunc("/ready", readyHandler)
 	http.HandleFunc("/fraud-score", fraudScoreHandler)
+
+	socketPath := os.Getenv("API_SOCKET")
+	if socketPath != "" {
+		_ = os.Remove(socketPath)
+
+		ln, err := net.Listen("unix", socketPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer ln.Close()
+
+		if err := os.Chmod(socketPath, 0o666); err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Println("Server listening on unix socket", socketPath)
+		log.Fatal(http.Serve(ln, nil))
+	}
+
 	fmt.Println("Server listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
