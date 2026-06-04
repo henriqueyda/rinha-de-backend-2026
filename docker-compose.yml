@@ -1,4 +1,23 @@
 services:
+  haproxy:
+    image: haproxy:3.0-alpine
+    hostname: haproxy
+    platform: linux/amd64
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - vol:/var/run/rinha
+    depends_on:
+      - api1
+      - api2
+    networks:
+      - network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: "50MB"
   api1:
     image: henriqueyda/rinha-backend-2026:2
     hostname: api1
@@ -30,26 +49,6 @@ services:
         limits:
           cpus: "0.4"
           memory: "150MB"
-
-  haproxy:
-    image: haproxy:3.0-alpine
-    hostname: haproxy
-    platform: linux/amd64
-    ports:
-      - "9999:9999"
-    volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - vol:/var/run/rinha
-    depends_on:
-      - api1
-      - api2
-    networks:
-      - network
-    deploy:
-      resources:
-        limits:
-          cpus: "0.20"
-          memory: "50MB"
 
 networks:
   network:
