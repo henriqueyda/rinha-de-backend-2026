@@ -1,36 +1,4 @@
 services:
-  api1:
-    build: .
-    hostname: api1
-    platform: linux/amd64
-    environment:
-      - API_SOCKET=/var/run/rinha/api1.sock
-    volumes:
-      - socket-dir:/var/run/rinha
-    networks:
-      - fraud-network
-    deploy:
-      resources:
-        limits:
-          cpus: "0.425"
-          memory: "160MB"
-
-  api2:
-    build: .
-    hostname: api2
-    platform: linux/amd64
-    environment:
-      - API_SOCKET=/var/run/rinha/api2.sock
-    volumes:
-      - socket-dir:/var/run/rinha
-    networks:
-      - fraud-network
-    deploy:
-      resources:
-        limits:
-          cpus: "0.425"
-          memory: "160MB"
-
   haproxy:
     image: haproxy:3.0-alpine
     hostname: haproxy
@@ -39,21 +7,52 @@ services:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - socket-dir:/var/run/rinha
+      - vol:/var/run/rinha
     depends_on:
       - api1
       - api2
     networks:
-      - fraud-network
+      - network
     deploy:
       resources:
         limits:
-          cpus: "0.15"
-          memory: "30MB"
+          cpus: "0.20"
+          memory: "50MB"
+  api1:
+    image: henriqueyda/rinha-backend-2026:2
+    hostname: api1
+    platform: linux/amd64
+    environment:
+      - API_SOCKET=/var/run/rinha/api1.sock
+    volumes:
+      - vol:/var/run/rinha
+    networks:
+      - network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: "150MB"
+
+  api2:
+    image: henriqueyda/rinha-backend-2026:2
+    hostname: api2
+    platform: linux/amd64
+    environment:
+      - API_SOCKET=/var/run/rinha/api2.sock
+    volumes:
+      - vol:/var/run/rinha
+    networks:
+      - network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: "150MB"
 
 networks:
-  fraud-network:
+  network:
     driver: bridge
 
 volumes:
-  socket-dir:
+  vol:
